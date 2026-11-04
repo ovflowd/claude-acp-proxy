@@ -1,15 +1,23 @@
-// Puts a thread's model, effort and toggles back when Zed opens it again. Zed applies its
-// `default_config_options` to new sessions only, and shows what the adapter answers on load and resume.
-// The host calls `fromClient(message)` for each client message and `fromAgent(message)` for each
-// adapter message (true: taken, do not forward), and gives `send` (to the adapter) and `forward` (to the client).
+// Puts a thread's model, effort and toggles back when Zed opens it again. Zed applies
+// its `default_config_options` to new sessions only, and shows what the adapter answers
+// on load and resume. The host calls `fromClient(message)` for each client message and
+// `fromAgent(message)` for each adapter message (true: taken, do not forward), and
+// gives `send` (to the adapter) and `forward` (to the client).
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { open, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const SET_METHODS = new Set(["session/set_config_option", "session/set_model", "session/set_mode"]);
+const SET_METHODS = new Set([
+  "session/set_config_option",
+  "session/set_model",
+  "session/set_mode",
+]);
 const OPEN_METHODS = new Set(["session/load", "session/resume"]);
-const LEGACY_SETTERS = { "session/set_model": ["model", "modelId"], "session/set_mode": ["mode", "modeId"] };
+const LEGACY_SETTERS = {
+  "session/set_model": ["model", "modelId"],
+  "session/set_mode": ["mode", "modeId"],
+};
 const RESTORE_PREFIX = "restore:";
 const RESTORE_TIMEOUT_MS = 30_000;
 const MAX_SESSIONS = 300;
@@ -50,7 +58,8 @@ export class SessionConfigMemory {
       const sessionId = message.params?.sessionId;
       if (typeof sessionId !== "string") return;
       if (SET_METHODS.has(message.method)) this.#setRequests.set(message.id, message);
-      else if (OPEN_METHODS.has(message.method)) this.#openRequests.set(message.id, sessionId);
+      else if (OPEN_METHODS.has(message.method))
+        this.#openRequests.set(message.id, sessionId);
     } catch (error) {
       report(error);
     }
@@ -114,11 +123,16 @@ export class SessionConfigMemory {
     const deadline = Date.now() + RESTORE_TIMEOUT_MS;
     for (const call of calls) {
       const sent = asConfigOption(call, configOptions);
-      const reply = await this.#request(sent.method, sent.params, deadline - Date.now());
+      const reply = await this.#request(
+        sent.method,
+        sent.params,
+        deadline - Date.now(),
+      );
       if (reply.timedOut) break;
       if (reply.error) continue;
       if (call === bootstrap) this.#remember(call);
-      if (Array.isArray(reply.result?.configOptions)) restored = reply.result.configOptions;
+      if (Array.isArray(reply.result?.configOptions))
+        restored = reply.result.configOptions;
     }
     if (!restored || !response.result) return;
     response.result.configOptions = restored;
@@ -154,7 +168,8 @@ export class SessionConfigMemory {
     const transcriptModel = await lastTranscriptModel(sessionId);
     const family = MODEL_FAMILIES.find((name) => transcriptModel?.includes(name));
     if (!family || modelOption.currentValue === family) return undefined;
-    if (!modelOption.options.some((option) => option.value === family)) return undefined;
+    if (!modelOption.options.some((option) => option.value === family))
+      return undefined;
     return {
       method: "session/set_config_option",
       params: { sessionId, configId: "model", value: family },
@@ -169,7 +184,9 @@ export class SessionConfigMemory {
   #read() {
     try {
       const { sessions } = JSON.parse(readFileSync(this.#file, "utf8"));
-      return Object.fromEntries(Object.entries(sessions ?? {}).filter(([, session]) => isSession(session)));
+      return Object.fromEntries(
+        Object.entries(sessions ?? {}).filter(([, session]) => isSession(session)),
+      );
     } catch {
       return {};
     }
@@ -183,7 +200,10 @@ export class SessionConfigMemory {
       this.#sessions = Object.fromEntries(newest);
       mkdirSync(dirname(this.#file), { recursive: true });
       const temporary = `${this.#file}.${process.pid}.tmp`;
-      writeFileSync(temporary, `${JSON.stringify({ sessions: this.#sessions }, null, 1)}\n`);
+      writeFileSync(
+        temporary,
+        `${JSON.stringify({ sessions: this.#sessions }, null, 1)}\n`,
+      );
       renameSync(temporary, this.#file);
     } catch (error) {
       report(`could not save: ${error?.message ?? error}`);
@@ -194,21 +214,30 @@ export class SessionConfigMemory {
 function isSession(session) {
   const calls = session?.calls;
   if (typeof calls !== "object" || calls === null) return false;
-  return Object.values(calls).every((call) => typeof call?.method === "string" && typeof call.params?.sessionId === "string");
+  return Object.values(calls).every(
+    (call) =>
+      typeof call?.method === "string" && typeof call.params?.sessionId === "string",
+  );
 }
 
-/** The option a request sets, so that the legacy and the option form of one setting share a slot. */
+/** The option that a request sets: both forms of one setting share a slot. */
 function slotOf(call) {
   if (call.method === "session/set_config_option") return String(call.params.configId);
   return LEGACY_SETTERS[call.method]?.[0] ?? call.method;
 }
 
-/** A legacy request becomes the option request when the adapter offers that option: its reply has the new option list. */
+/**
+ * A legacy request becomes the option request when the adapter offers that option,
+ * because the reply to the option request has the new option list.
+ */
 function asConfigOption(call, configOptions) {
   const legacy = LEGACY_SETTERS[call.method];
   if (!legacy || !configOptions?.some((option) => option.id === legacy[0])) return call;
   const [configId, field] = legacy;
-  return { method: "session/set_config_option", params: { sessionId: call.params.sessionId, configId, value: call.params[field] } };
+  return {
+    method: "session/set_config_option",
+    params: { sessionId: call.params.sessionId, configId, value: call.params[field] },
+  };
 }
 
 /** The model goes first: a model can change which efforts are offered. */
@@ -218,7 +247,10 @@ function rank(slot) {
 }
 
 async function lastTranscriptModel(sessionId) {
-  const projects = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "projects");
+  const projects = join(
+    process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
+    "projects",
+  );
   let directories;
   try {
     directories = await readdir(projects);
