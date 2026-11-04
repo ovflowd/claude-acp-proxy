@@ -1,7 +1,8 @@
 // The SDK as claude-agent-acp sees it (served in place of the real module by
-// remote-control.mjs). query() turns Remote Control on (CLAUDIO_ZED_REMOTE_CONTROL=0
-// turns it off), and getSessionMessages() without options also returns the history from
-// before each compaction (CLAUDIO_ZED_FULL_HISTORY=0 turns it off).
+// remote-control.mjs). query() turns Remote Control on when
+// CLAUDE_ACP_PROXY_REMOTE_CONTROL=1, and getSessionMessages() without options also
+// returns the history from before each compaction (CLAUDE_ACP_PROXY_FULL_HISTORY=0
+// turns that off).
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +15,7 @@ export * from "@anthropic-ai/claude-agent-sdk";
 
 export function query(params) {
   const session = sdkQuery(params);
-  if (process.env.CLAUDIO_ZED_REMOTE_CONTROL !== "0") enableRemoteControl(session);
+  if (process.env.CLAUDE_ACP_PROXY_REMOTE_CONTROL === "1") enableRemoteControl(session);
   return session;
 }
 
@@ -33,7 +34,7 @@ async function enableRemoteControl(session) {
 // replay from its summary on.
 export async function getSessionMessages(sessionId, options) {
   const active = await sdkGetSessionMessages(sessionId, options);
-  if (options !== undefined || process.env.CLAUDIO_ZED_FULL_HISTORY === "0")
+  if (options !== undefined || process.env.CLAUDE_ACP_PROXY_FULL_HISTORY === "0")
     return active;
   try {
     const messages = await withEarlierHistory(sessionId, active);
@@ -165,7 +166,10 @@ function toSessionMessage(record, sessionId) {
   return undefined;
 }
 
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function readTranscript(sessionId) {
+  if (!SESSION_ID.test(sessionId)) return undefined;
   const projects = join(
     process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
     "projects",
@@ -183,8 +187,8 @@ async function readTranscript(sessionId) {
         "utf8",
       );
       return text;
-    } catch {
-      continue;
+    } catch (error) {
+      if (error.code !== "ENOENT") console.error(`full history: ${error.message}`);
     }
   }
   return undefined;
