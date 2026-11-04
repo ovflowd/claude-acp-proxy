@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,3 +77,19 @@ test(
     assert.equal(code, 0);
   },
 );
+
+test("an unusable picker file stops the proxy with a reason", options, async () => {
+  const configDir = mkdtempSync(join(tmpdir(), "acp-proxy-"));
+  const result = spawnSync(process.execPath, [join(root, "proxy.mjs")], {
+    env: {
+      ...cleanEnv(),
+      CLAUDE_CONFIG_DIR: configDir,
+      CLAUDE_ACP_PROXY_PICKER: "/nope",
+    },
+    encoding: "utf8",
+    input: "",
+  });
+  rmSync(configDir, { recursive: true, force: true });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /CLAUDE_ACP_PROXY_PICKER/);
+});

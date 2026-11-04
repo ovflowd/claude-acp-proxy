@@ -15,6 +15,7 @@ surprised its author. It is an unofficial project, not affiliated with Anthropic
 | The adapter loads a repository's own `.claude/settings.json`, so the hooks of a repo you just cloned run with no trust prompt. | Claude Code loads only your user settings, as with `claude --setting-sources user`: a cloned repository's hooks, `CLAUDE.md` and permission rules do not apply. You can choose the sources. |
 | A thread that Claude compacted reopens from its summary on. Claude remembers the rest, the editor does not show it. | The whole thread replays, including prompts typed while Claude was working and background-task notifications. |
 | A reopened thread forgets its model, effort, Ultracode and fast toggles and goes back to your defaults. | Each thread comes back as you left it. |
+| The model list shows every model, including ones you never use, under the names of the adapter. | Optional: a picker file hides models and renames the others. |
 | Remote Control is never turned on for editor threads. | Optional: turn it on for every thread. |
 
 ## Quick start
@@ -64,6 +65,7 @@ Set these in the agent's `env`. All are optional.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `CLAUDE_ACP_PROXY_SETTING_SOURCES` | `user` | Which Claude Code settings load: a comma-separated list of `user`, `project` and `local`, or `default` for the adapter's own choice (all three). The names are lower case. A value that is not valid is ignored with a warning, and `user` is used. |
+| `CLAUDE_ACP_PROXY_PICKER` | none | The path of a [picker file](#model-picker) that hides models and renames the others. |
 | `CLAUDE_ACP_PROXY_REMOTE_CONTROL` | off | `1` (only that value) turns [Remote Control](https://code.claude.com/docs/en/remote-control) on for every thread, so you can pick it up from the Claude app or claude.ai/code. It needs a claude.ai login, not an API key. A failure is written to the agent's stderr as `remote control: …`. See [Security and privacy](#security-and-privacy). |
 | `CLAUDE_ACP_PROXY_FULL_HISTORY` | on | `0` goes back to the SDK's history, which starts at the last compaction. |
 | `CLAUDE_ACP_PROXY_SESSION_CONFIG` | on | `0` stops remembering per-thread settings. The adapter's stdout then goes straight to the editor. |
@@ -71,6 +73,23 @@ Set these in the agent's `env`. All are optional.
 
 A thread that was started before you turned Remote Control on gets it by sending
 `/remote-control` in it. The adapter matches only the full name.
+
+## Model picker
+
+`CLAUDE_ACP_PROXY_PICKER` names a JSON file:
+
+```json
+{
+  "hide": ["^default$", "^claude-.*-4-"],
+  "labels": { "opus": "Opus 5.5", "sonnet": "Sonnet 5.5" }
+}
+```
+
+`hide` is a list of regular expressions, tested against the model values that the adapter
+offers (`opus`, `claude-opus-4-8` and so on). `labels` maps a model value to the name that
+the editor shows. The model that a thread runs is never hidden, so the list stays valid. A
+remembered model that the picker hides is not restored: the thread keeps the model it
+starts with. A file that cannot be read stops the proxy with the reason.
 
 ## How it works
 
@@ -83,6 +102,8 @@ editor ⇄ proxy.mjs ⇄ claude-agent-acp ⇄ Claude Code
 | File | Job |
 | --- | --- |
 | `proxy.mjs` | The agent command. Starts the adapter, adds `settingSources` to `session/new`, `session/load`, `session/resume` and `session/fork` through `_meta.claudeCode.options`, and passes everything else through. |
+| `setting-sources.mjs` | The rewrite of the session requests and the parsing of `CLAUDE_ACP_PROXY_SETTING_SOURCES`. |
+| `model-picker.mjs` | Hides and renames the models that the adapter offers. |
 | `session-config.mjs` | Remembers the last successful `session/set_config_option`, `session/set_model` and `session/set_mode` request of each thread and sends them to the adapter again when the thread is loaded or resumed. |
 | `remote-control.mjs` | Loaded into the adapter with `node --import`. A `module.registerHooks` hook that serves `remote-control-sdk.mjs` in place of `@anthropic-ai/claude-agent-sdk`. |
 | `remote-control-sdk.mjs` | The shim. Re-exports the SDK, wraps `query()` to enable Remote Control, and replaces `getSessionMessages()` with a version that also reads the history from before each compaction. |
@@ -138,6 +159,8 @@ Found a problem? See [SECURITY.md](SECURITY.md).
 - **Adapter:** pinned to `0.99.1` in [`adapter/package.json`](adapter/package.json). Its
   history and per-thread settings were also checked against `0.93.0`.
 - **Platforms:** CI runs Node 22 and 24 on Linux and macOS. Windows is untested.
+- **Ultracode and fast mode:** the adapter offers them as options from `0.99`. Zed shows
+  them as toggles. An older adapter has no Ultracode option.
 - **Editors:** developed with Zed. The proxy speaks plain ACP over stdio, so another editor
   should work, but only Zed has been tried.
 - **What it depends on:** the shim relies on two things that are not public API: the
