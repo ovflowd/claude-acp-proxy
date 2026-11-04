@@ -1,7 +1,5 @@
-// Loaded by proxy.mjs with `node --import`. Starts every Zed session with Remote Control on, so
-// a thread can be picked up from the Claude app or claude.ai/code. Under the SDK the CLI only
-// reports `remote_control_auto_enable` and leaves `enableRemoteControl()` to the host, which
-// claude-agent-acp never calls. This routes the adapter's SDK import through a shim that does.
+// Loaded by proxy.mjs with `node --import`. Routes the adapter's import of the SDK through
+// remote-control-sdk.mjs, which turns Remote Control on and returns the full history of a compacted thread.
 // The shim is served at the SDK's own URL plus a query, because the adapter finds the CLI binary
 // with a require bound to wherever the SDK resolves.
 import { readFileSync } from "node:fs";
