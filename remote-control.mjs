@@ -1,7 +1,8 @@
-// Loaded by proxy.mjs with `node --import`. Routes the adapter's import of the SDK through
-// remote-control-sdk.mjs, which turns Remote Control on and returns the full history of a compacted thread.
-// The shim is served at the SDK's own URL plus a query, because the adapter finds the CLI binary
-// with a require bound to wherever the SDK resolves.
+// Loaded by proxy.mjs with `node --import`. Routes the adapter's import of the SDK
+// through remote-control-sdk.mjs, which turns Remote Control on and returns the full
+// history of a compacted thread. The shim is served at the SDK's own URL plus a query,
+// because the adapter finds the CLI binary with a require bound to wherever the SDK
+// resolves.
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 
@@ -17,6 +18,10 @@ registerHooks({
   },
   load(url, context, nextLoad) {
     if (!url.endsWith(SHIM)) return nextLoad(url, context);
-    return { format: "module", source: readFileSync(SHIM_SOURCE, "utf8"), shortCircuit: true };
+    return {
+      format: "module",
+      source: readFileSync(SHIM_SOURCE, "utf8"),
+      shortCircuit: true,
+    };
   },
 });
