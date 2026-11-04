@@ -1,1 +1,9 @@
 node_modules/
+.env
+.env.*
+*.log
+npm-debug.log*
+sessions.json
+*.tmp
+.DS_Store
+.idea/

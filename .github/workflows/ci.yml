@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: adapter/package-lock.json
+      - name: Install the adapter
+        run: npm ci
+        working-directory: adapter
+      - name: Check that the SDK still has enableRemoteControl
+        run: grep -q enableRemoteControl node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
+        working-directory: adapter
+        shell: bash
+      - name: Check the syntax
+        run: for file in *.mjs test/*.mjs; do node --check "$file"; done
+        shell: bash
+      - name: Check the formatting
+        run: npx --yes prettier@3.6.2 --check "*.mjs" "test/*.mjs"
+        shell: bash
+      - name: Test
+        run: npm test
