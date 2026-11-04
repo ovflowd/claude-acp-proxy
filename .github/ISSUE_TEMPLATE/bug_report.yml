@@ -1,0 +1,43 @@
+name: Bug report
+description: Something does not work as the README says
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste transcripts, settings files or tokens: they contain your
+        conversations. A description is enough.
+  - type: input
+    id: adapter
+    attributes:
+      label: Adapter version
+      description: The version in `adapter/package.json`, or the output of `npm ls` in `adapter/`.
+    validations:
+      required: true
+  - type: input
+    id: proxy
+    attributes:
+      label: Proxy commit
+      description: The output of `git rev-parse --short HEAD` in your checkout.
+  - type: input
+    id: environment
+    attributes:
+      label: Node version, operating system and editor
+      placeholder: Node 24.1, macOS 15, Zed 1.26
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: config
+    attributes:
+      label: The agent entry in your editor settings
+      description: Without secrets. Say which `CLAUDE_ACP_PROXY_*` variables you set.
+      render: jsonc
