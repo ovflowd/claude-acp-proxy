@@ -1,14 +1,12 @@
-// Zed's Claude agent, run the way `claudio` runs Claude Code: Zed's env sets
-// CLAUDE_CONFIG_DIR, and every session loads user settings only, like
-// `--setting-sources user`. The adapter otherwise also loads a repo's
-// .claude/settings.json, whose hooks would run without a trust prompt. The adapter runs
-// with remote-control.mjs preloaded (Remote Control, full history), and
-// session-config.mjs puts a thread's model, effort and toggles back when Zed opens it
-// again.
+// An ACP agent for editors such as Zed. It runs claude-agent-acp, changes the requests
+// that start a thread, and keeps what each thread was set to (see README.md).
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import * as nodeModule from "node:module";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { SessionConfigMemory } from "./session-config.mjs";
+import { parseSettingSources, withSettingSources } from "./setting-sources.mjs";
 
 const adapter = fileURLToPath(
   new URL(
@@ -16,16 +14,28 @@ const adapter = fileURLToPath(
     import.meta.url,
   ),
 );
-const remoteControl = fileURLToPath(new URL("./remote-control.mjs", import.meta.url));
-const SESSION_METHODS = new Set([
-  "session/new",
-  "session/load",
-  "session/resume",
-  "session/fork",
-]);
+const sdkHook = new URL("./remote-control.mjs", import.meta.url).href;
+
+if (typeof nodeModule.registerHooks !== "function") {
+  console.error(
+    `claude-acp-proxy needs Node 22.15 or later, this is ${process.version}.`,
+  );
+  process.exit(1);
+}
+if (!existsSync(adapter)) {
+  const dir = fileURLToPath(new URL("./adapter", import.meta.url));
+  console.error(
+    `claude-acp-proxy: the adapter is not installed. Run "npm ci" in ${dir}.`,
+  );
+  process.exit(1);
+}
+
+const settingSources = parseSettingSources(
+  process.env.CLAUDE_ACP_PROXY_SETTING_SOURCES,
+);
 
 const memory =
-  process.env.CLAUDIO_ZED_SESSION_CONFIG === "0"
+  process.env.CLAUDE_ACP_PROXY_SESSION_CONFIG === "0"
     ? undefined
     : new SessionConfigMemory({
         send: (message) => child.stdin.write(`${JSON.stringify(message)}\n`),
@@ -34,10 +44,8 @@ const memory =
 
 const child = spawn(
   process.execPath,
-  ["--import", remoteControl, adapter, ...process.argv.slice(2)],
-  {
-    stdio: ["pipe", memory ? "pipe" : "inherit", "inherit"],
-  },
+  ["--import", sdkHook, adapter, ...process.argv.slice(2)],
+  { stdio: ["pipe", memory ? "pipe" : "inherit", "inherit"] },
 );
 
 if (memory) {
@@ -49,7 +57,7 @@ if (memory) {
 }
 
 createInterface({ input: process.stdin, crlfDelay: Infinity })
-  .on("line", (line) => child.stdin.write(`${withUserSettingsOnly(line)}\n`))
+  .on("line", (line) => child.stdin.write(`${fromClient(line)}\n`))
   .on("close", () => child.stdin.end());
 
 function parse(line) {
@@ -60,15 +68,15 @@ function parse(line) {
   }
 }
 
-function withUserSettingsOnly(line) {
-  const message = parse(line);
-  if (message === undefined) return line;
-  memory?.fromClient(message);
-  if (!SESSION_METHODS.has(message?.method) || typeof message.params !== "object")
-    return line;
-  const claudeCode = ((message.params._meta ??= {}).claudeCode ??= {});
-  claudeCode.options = { ...claudeCode.options, settingSources: ["user"] };
-  return JSON.stringify(message);
+function fromClient(line) {
+  const parsed = parse(line);
+  if (parsed === undefined) return line;
+  let changed = false;
+  for (const message of Array.isArray(parsed) ? parsed : [parsed]) {
+    memory?.fromClient(message);
+    if (settingSources && withSettingSources(message, settingSources)) changed = true;
+  }
+  return changed ? JSON.stringify(parsed) : line;
 }
 
 // The adapter's last lines can still be in the pipe when it exits.

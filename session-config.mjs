@@ -3,7 +3,8 @@
 // on load and resume. The host calls `fromClient(message)` for each client message and
 // `fromAgent(message)` for each adapter message (true: taken, do not forward), and
 // gives `send` (to the adapter) and `forward` (to the client).
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { open, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,7 +19,7 @@ const LEGACY_SETTERS = {
   "session/set_model": ["model", "modelId"],
   "session/set_mode": ["mode", "modeId"],
 };
-const RESTORE_PREFIX = "restore:";
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RESTORE_TIMEOUT_MS = 30_000;
 const MAX_SESSIONS = 300;
 const TRANSCRIPT_TAIL_BYTES = 512 * 1024;
@@ -26,7 +27,9 @@ const MODEL_FAMILIES = ["opus", "sonnet", "haiku", "fable", "mythos"];
 const SLOT_ORDER = ["model", "effort", "ultracode", "fast"];
 
 function defaultStateFile() {
-  if (process.env.CLAUDIO_ZED_STATE_FILE) return process.env.CLAUDIO_ZED_STATE_FILE;
+  if (process.env.CLAUDE_ACP_PROXY_STATE_FILE) {
+    return process.env.CLAUDE_ACP_PROXY_STATE_FILE;
+  }
   const state = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
   return join(state, "claude-acp-proxy", "sessions.json");
 }
@@ -44,6 +47,8 @@ export class SessionConfigMemory {
   #openRequests = new Map();
   #restoreReplies = new Map();
   #sequence = 0;
+  // Ids of the requests that this memory sends: a client cannot use one by chance.
+  #restorePrefix = `restore:${randomUUID()}:`;
 
   constructor({ send, forward, file = defaultStateFile() }) {
     this.#send = send;
@@ -76,7 +81,7 @@ export class SessionConfigMemory {
 
   #takeFromAgent(message) {
     if (message?.id === undefined || message.method !== undefined) return false;
-    if (typeof message.id === "string" && message.id.startsWith(RESTORE_PREFIX)) {
+    if (typeof message.id === "string" && message.id.startsWith(this.#restorePrefix)) {
       this.#restoreReplies.get(message.id)?.(message);
       return true;
     }
@@ -149,7 +154,7 @@ export class SessionConfigMemory {
 
   #request(method, params, timeoutMs) {
     if (timeoutMs <= 0) return Promise.resolve({ timedOut: true });
-    const id = `${RESTORE_PREFIX}${++this.#sequence}`;
+    const id = `${this.#restorePrefix}${++this.#sequence}`;
     return new Promise((resolve) => {
       const finish = (reply) => {
         clearTimeout(timer);
@@ -198,13 +203,17 @@ export class SessionConfigMemory {
         .sort(([, a], [, b]) => (b.updated ?? 0) - (a.updated ?? 0))
         .slice(0, MAX_SESSIONS);
       this.#sessions = Object.fromEntries(newest);
-      mkdirSync(dirname(this.#file), { recursive: true });
-      const temporary = `${this.#file}.${process.pid}.tmp`;
-      writeFileSync(
-        temporary,
-        `${JSON.stringify({ sessions: this.#sessions }, null, 1)}\n`,
-      );
-      renameSync(temporary, this.#file);
+      mkdirSync(dirname(this.#file), { recursive: true, mode: 0o700 });
+      // A new file under a name nobody can guess, so a planted link is not followed.
+      const temporary = `${this.#file}.${randomUUID()}.tmp`;
+      const content = `${JSON.stringify({ sessions: this.#sessions }, null, 1)}\n`;
+      try {
+        writeFileSync(temporary, content, { mode: 0o600, flag: "wx" });
+        renameSync(temporary, this.#file);
+      } catch (error) {
+        rmSync(temporary, { force: true });
+        throw error;
+      }
     } catch (error) {
       report(`could not save: ${error?.message ?? error}`);
     }
@@ -247,6 +256,7 @@ function rank(slot) {
 }
 
 async function lastTranscriptModel(sessionId) {
+  if (!SESSION_ID.test(sessionId)) return undefined;
   const projects = join(
     process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
     "projects",
