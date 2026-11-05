@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { loadPicker } from "./model-picker.mjs";
 import { SessionConfigMemory } from "./session-config.mjs";
 import { parseSettingSources, withSettingSources } from "./setting-sources.mjs";
+import { Steering } from "./steering.mjs";
 
 const adapter = fileURLToPath(
   new URL(
@@ -42,13 +43,18 @@ const memory =
     ? undefined
     : new SessionConfigMemory({ send: sendToAdapter, forward: sendToClient });
 
+const steering =
+  process.env.CLAUDE_ACP_PROXY_STEERING === "1"
+    ? new Steering({ send: writeToAdapter, forward: sendToClient })
+    : undefined;
+
 const child = spawn(
   process.execPath,
   ["--import", sdkHook, adapter, ...process.argv.slice(2)],
-  { stdio: ["pipe", memory || picker ? "pipe" : "inherit", "inherit"] },
+  { stdio: ["pipe", memory || picker || steering ? "pipe" : "inherit", "inherit"] },
 );
 
-if (memory || picker) {
+if (memory || picker || steering) {
   createInterface({ input: child.stdout, crlfDelay: Infinity }).on("line", (line) => {
     const out = fromAdapter(line);
     if (out !== undefined) process.stdout.write(`${out}\n`);
@@ -56,7 +62,10 @@ if (memory || picker) {
 }
 
 createInterface({ input: process.stdin, crlfDelay: Infinity })
-  .on("line", (line) => child.stdin.write(`${fromClient(line)}\n`))
+  .on("line", (line) => {
+    const out = fromClient(line);
+    if (out !== undefined) child.stdin.write(`${out}\n`);
+  })
   .on("close", () => child.stdin.end());
 
 function loadPickerFromEnv(file) {
@@ -79,6 +88,10 @@ function sendToAdapter(message) {
     setImmediate(() => memory.fromAgent({ jsonrpc: "2.0", id: message.id, error }));
     return;
   }
+  writeToAdapter(message);
+}
+
+function writeToAdapter(message) {
   child.stdin.write(`${JSON.stringify(message)}\n`);
 }
 
@@ -93,7 +106,7 @@ function fromAdapter(line) {
   if (isUpdate && !line.includes("config_option_update")) return line;
   const message = parse(line);
   if (message === undefined) return line;
-  if (memory?.fromAgent(message)) return undefined;
+  if (memory?.fromAgent(message) || steering?.fromAgent(message)) return undefined;
   return picker?.apply(message) ? JSON.stringify(message) : line;
 }
 
@@ -105,15 +118,22 @@ function parse(line) {
   }
 }
 
+// Returns the line to pass on, or undefined when nothing is left of it.
 function fromClient(line) {
   const parsed = parse(line);
   if (parsed === undefined) return line;
+  const kept = [];
   let changed = false;
   for (const message of Array.isArray(parsed) ? parsed : [parsed]) {
     memory?.fromClient(message);
     if (settingSources && withSettingSources(message, settingSources)) changed = true;
+    const out = steering ? steering.fromClient(message) : message;
+    if (out !== message) changed = true;
+    if (out !== undefined) kept.push(out);
   }
-  return changed ? JSON.stringify(parsed) : line;
+  if (!changed) return line;
+  if (kept.length === 0) return undefined;
+  return JSON.stringify(Array.isArray(parsed) ? kept : kept[0]);
 }
 
 // The adapter's last lines can still be in the pipe when it exits.

@@ -16,6 +16,7 @@ surprised its author. It is an unofficial project, not affiliated with Anthropic
 | A thread that Claude compacted reopens from its summary on. Claude remembers the rest, the editor does not show it. | The whole thread replays, including prompts typed while Claude was working and background-task notifications. |
 | A reopened thread forgets its model, effort, Ultracode and fast toggles and goes back to your defaults. | Each thread comes back as you left it. |
 | The model list shows every model, including ones you never use, under the names of the adapter. | Optional: a picker file hides models and renames the others. |
+| Sending a message while Claude works interrupts the turn: it is cancelled and the new message starts again. | Optional: the message steers the running turn instead. |
 | Remote Control is never turned on for editor threads. | Optional: turn it on for every thread. |
 
 ## Quick start
@@ -66,6 +67,7 @@ Set these in the agent's `env`. All are optional.
 | --- | --- | --- |
 | `CLAUDE_ACP_PROXY_SETTING_SOURCES` | `user` | Which Claude Code settings load: a comma-separated list of `user`, `project` and `local`, or `default` for the adapter's own choice (all three). The names are lower case. A value that is not valid is ignored with a warning, and `user` is used. |
 | `CLAUDE_ACP_PROXY_PICKER` | none | The path of a [picker file](#model-picker) that hides models and renames the others. |
+| `CLAUDE_ACP_PROXY_STEERING` | off | `1` makes a message that you send while Claude works steer the running turn instead of cancelling it. See [Steering](#steering). |
 | `CLAUDE_ACP_PROXY_REMOTE_CONTROL` | off | `1` (only that value) turns [Remote Control](https://code.claude.com/docs/en/remote-control) on for every thread, so you can pick it up from the Claude app or claude.ai/code. It needs a claude.ai login, not an API key. A failure is written to the agent's stderr as `remote control: …`. See [Security and privacy](#security-and-privacy). |
 | `CLAUDE_ACP_PROXY_FULL_HISTORY` | on | `0` goes back to the SDK's history, which starts at the last compaction. |
 | `CLAUDE_ACP_PROXY_SESSION_CONFIG` | on | `0` stops remembering per-thread settings. The adapter's stdout then goes straight to the editor. |
@@ -91,6 +93,25 @@ the editor shows. The model that a thread runs is never hidden, so the list stay
 remembered model that the picker hides is not restored: the thread keeps the model it
 starts with. A file that cannot be read stops the proxy with the reason.
 
+## Steering
+
+When you send a message while Claude works, Zed interrupts: it sends `session/cancel`,
+waits for the answer to the running prompt, and then sends the new prompt. Claude Code
+itself would take the message into the running turn. The adapter has a request for that,
+`_session/steering`, but Zed does not use it with an external agent.
+
+With `CLAUDE_ACP_PROXY_STEERING=1` the proxy holds the cancel back for 300 ms and answers
+the running prompt as cancelled, so the editor moves on. A prompt that follows in that time
+goes to the adapter as `_session/steering`: the turn keeps running, its tool calls are not
+killed, and Claude reads the message at its next step. The real answer of the turn then
+answers the new prompt. If no prompt follows, the cancel goes to the adapter when the 300 ms
+are over, so Stop still stops the turn, 300 ms later. A turn that has ended by then gets the
+message as an ordinary prompt.
+
+It needs an adapter that says it supports steering (0.99 does) and does nothing otherwise.
+Zed queues a message that you send while Claude works until the turn ends, unless you send
+it with "Send Now": only that interrupt is changed.
+
 ## How it works
 
 ```
@@ -104,6 +125,7 @@ editor ⇄ proxy.mjs ⇄ claude-agent-acp ⇄ Claude Code
 | `proxy.mjs` | The agent command. Starts the adapter, adds `settingSources` to `session/new`, `session/load`, `session/resume` and `session/fork` through `_meta.claudeCode.options`, and passes everything else through. |
 | `setting-sources.mjs` | The rewrite of the session requests and the parsing of `CLAUDE_ACP_PROXY_SETTING_SOURCES`. |
 | `model-picker.mjs` | Hides and renames the models that the adapter offers. |
+| `steering.mjs` | Turns "stop, then send a new message" into a steering request to the adapter. |
 | `session-config.mjs` | Remembers the last successful `session/set_config_option`, `session/set_model` and `session/set_mode` request of each thread and sends them to the adapter again when the thread is loaded or resumed. |
 | `remote-control.mjs` | Loaded into the adapter with `node --import`. A `module.registerHooks` hook that serves `remote-control-sdk.mjs` in place of `@anthropic-ai/claude-agent-sdk`. |
 | `remote-control-sdk.mjs` | The shim. Re-exports the SDK, wraps `query()` to enable Remote Control, and replaces `getSessionMessages()` with a version that also reads the history from before each compaction. |
@@ -175,6 +197,8 @@ Found a problem? See [SECURITY.md](SECURITY.md).
   async tasks only to a client that advertises JetBrains AIR's capability. Their
   notifications do come back when a thread is replayed.
 - Zed gives every custom agent the same generic icon. It has no setting for another.
+- Steering moves a running tool call (a shell command, a subagent) to the background, as
+  Claude Code does. The editor shows the turn that it interrupted as cancelled for a moment.
 - Only the requests that the editor sends are remembered. A change the adapter makes on its
   own is not.
 
