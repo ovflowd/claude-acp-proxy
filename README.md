@@ -213,6 +213,15 @@ Then restart the agent, or open a new thread.
 
 ## Upgrading the adapter
 
+A workflow, [Update the adapter](.github/workflows/update-adapter.yml), looks for a new
+release of the adapter every day. When there is one, it installs it, runs the tests, checks
+that the SDK still has `enableRemoteControl`, and opens a pull request that lists the
+changes and the checks below, with CI running on its branch. It never merges: that is
+yours to do after you have looked at the thread checks. [Dependabot](.github/dependabot.yml)
+keeps the GitHub Actions of this repository up to date.
+
+By hand:
+
 ```sh
 cd adapter
 npm install --save-exact @agentclientprotocol/claude-agent-acp@<version>
