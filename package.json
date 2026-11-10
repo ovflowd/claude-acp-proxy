@@ -16,9 +16,19 @@
     "node": "^22.15.0 || >=23.5.0"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --test \"test/*.test.mjs\"",
+    "lint": "oxlint --deny-warnings",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "typecheck": "tsc"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.99.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "oxfmt": "0.76.0",
+    "oxlint": "1.91.0",
+    "typescript": "7.0.2"
   }
 }

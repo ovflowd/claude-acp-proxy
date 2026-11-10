@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "import", "node", "promise", "unicorn", "jsdoc"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error"
+  },
+  "env": {
+    "builtin": true,
+    "node": true,
+    "es2024": true
+  },
+  "rules": {
+    "curly": ["error", "multi-line"],
+    "eqeqeq": "error",
+    "no-var": "error",
+    "prefer-const": "error",
+    "object-shorthand": "error",
+    "import/no-cycle": "error",
+    "import/no-duplicates": "error",
+    "jsdoc/require-property-description": "off",
+    "no-underscore-dangle": "off"
+  }
+}
