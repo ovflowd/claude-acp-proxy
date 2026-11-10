@@ -1,19 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { after, test } from "node:test";
-import { SessionConfigMemory } from "../session-config.mjs";
+import { test } from "node:test";
 
-const directories = [];
-after(() =>
-  directories.forEach((dir) => rmSync(dir, { recursive: true, force: true })),
-);
+import { SessionConfigMemory } from "../src/session-config.mjs";
+import { temporaryDirectory } from "./helpers.mjs";
 
 function stateFile() {
-  const dir = mkdtempSync(join(tmpdir(), "acp-proxy-"));
-  directories.push(dir);
-  return join(dir, "sessions.json");
+  return join(temporaryDirectory(), "sessions.json");
 }
 
 function options(current = {}) {
@@ -127,21 +121,15 @@ test("a legacy set_mode becomes an option request and patches modes", async () =
   assert.equal(state.sent[0].params.value, "plan");
   const { result } = state.forwarded[0];
   assert.equal(result.modes.currentModeId, "plan");
-  assert.equal(
-    result.configOptions.find((option) => option.id === "mode").currentValue,
-    "plan",
-  );
+  assert.equal(result.configOptions.find((option) => option.id === "mode").currentValue, "plan");
 });
 
 test("one deadline covers the whole restore", async () => {
   const file = stateFile();
   const { memory } = harness(file);
-  ["model", "effort", "ultracode", "fast", "mode"].forEach((id, index) =>
-    configure(memory, index + 1, "S", id, "v"),
-  );
+  ["model", "effort", "ultracode", "fast", "mode"].forEach((id, index) => configure(memory, index + 1, "S", id, "v"));
   const realSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = (fn, ms, ...rest) =>
-    realSetTimeout(fn, ms >= 1000 ? 20 : ms, ...rest);
+  globalThis.setTimeout = (fn, ms, ...rest) => realSetTimeout(fn, ms >= 1000 ? 20 : ms, ...rest);
   try {
     const { state } = await reopen(file, "S", { silent: true });
     assert.equal(state.sent.length, 1, "stops after the first timeout");
@@ -217,13 +205,9 @@ test("reopening a thread keeps it among the newest", async () => {
   assert.ok(JSON.parse(readFileSync(file, "utf8")).sessions.old.updated > before);
 });
 
-test(
-  "the state file is private to the user",
-  { skip: process.platform === "win32" },
-  async () => {
-    const file = stateFile();
-    configure(harness(file).memory, 1, "S", "model", "opus");
-    const { statSync } = await import("node:fs");
-    assert.equal(statSync(file).mode & 0o077, 0);
-  },
-);
+test("the state file is private to the user", { skip: process.platform === "win32" }, async () => {
+  const file = stateFile();
+  configure(harness(file).memory, 1, "S", "model", "opus");
+  const { statSync } = await import("node:fs");
+  assert.equal(statSync(file).mode & 0o077, 0);
+});

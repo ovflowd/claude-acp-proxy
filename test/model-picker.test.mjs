@@ -1,19 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { after, test } from "node:test";
-import { loadPicker } from "../model-picker.mjs";
+import { test } from "node:test";
 
-const directories = [];
-after(() =>
-  directories.forEach((dir) => rmSync(dir, { recursive: true, force: true })),
-);
+import { loadPicker } from "../src/model-picker.mjs";
+import { temporaryDirectory } from "./helpers.mjs";
 
+/** @param {unknown} config The picker file, as an object or as its text. */
 function picker(config) {
-  const dir = mkdtempSync(join(tmpdir(), "acp-picker-"));
-  directories.push(dir);
-  const file = join(dir, "picker.json");
+  const file = join(temporaryDirectory(), "picker.json");
   writeFileSync(file, typeof config === "string" ? config : JSON.stringify(config));
   return loadPicker(file);
 }
@@ -56,13 +51,7 @@ test("the model that a thread runs stays, even when it is hidden", () => {
   const { apply } = picker({ hide: ["^claude-"] });
   const message = { result: { configOptions: [modelOption("claude-opus-4-6")] } };
   apply(message);
-  assert.deepEqual(values(message.result.configOptions[0]), [
-    "default",
-    "opus",
-    "sonnet",
-    "claude-opus-4-6",
-    "haiku",
-  ]);
+  assert.deepEqual(values(message.result.configOptions[0]), ["default", "opus", "sonnet", "claude-opus-4-6", "haiku"]);
   const other = { result: { configOptions: [modelOption("sonnet")] } };
   apply(other);
   assert.ok(!values(other.result.configOptions[0]).includes("claude-opus-4-6"));
@@ -95,30 +84,24 @@ test("option updates and the legacy model list are changed too", () => {
 
 test("a message without a model option is not changed", () => {
   const { apply } = picker({ hide: ["opus"], labels: { opus: "Opus" } });
-  for (const message of [
-    { id: 1, result: {} },
-    { method: "session/update" },
-    null,
-    5,
-  ]) {
+  for (const message of [{ id: 1, result: {} }, { method: "session/update" }, null, 5]) {
     assert.equal(apply(message), false);
   }
   assert.equal(apply({ result: { configOptions: [effortOption] } }), false);
 });
 
+/**
+ * @param {string} configId
+ * @param {string} value
+ */
+const setOption = (configId, value) => ({ method: "session/set_config_option", params: { configId, value } });
+
 test("a request for a hidden model is recognised", () => {
   const { picksHiddenModel } = picker({ hide: ["^claude-"] });
-  const setOption = (configId, value) => ({
-    method: "session/set_config_option",
-    params: { configId, value },
-  });
   assert.equal(picksHiddenModel(setOption("model", "claude-opus-4-6")), true);
   assert.equal(picksHiddenModel(setOption("model", "opus")), false);
   assert.equal(picksHiddenModel(setOption("effort", "claude-x")), false);
-  assert.equal(
-    picksHiddenModel({ method: "session/set_model", params: { modelId: "claude-a" } }),
-    true,
-  );
+  assert.equal(picksHiddenModel({ method: "session/set_model", params: { modelId: "claude-a" } }), true);
   assert.equal(picksHiddenModel({ method: "session/prompt", params: {} }), false);
   assert.equal(picksHiddenModel(undefined), false);
 });

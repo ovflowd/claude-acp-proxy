@@ -1,20 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
-const root = fileURLToPath(new URL("..", import.meta.url));
-const adapterDir = join(root, "adapter");
-const hook = join(root, "remote-control.mjs");
-const installed = existsSync(join(adapterDir, "node_modules", "@anthropic-ai"));
+import { cleanEnv, needsAdapter, root, temporaryDirectory } from "./helpers.mjs";
+
+const HOOK = pathToFileURL(join(root, "src", "sdk", "register.mjs")).href;
 const SESSION = "11111111-1111-4111-8111-111111111111";
-const directories = [];
-after(() =>
-  directories.forEach((dir) => rmSync(dir, { recursive: true, force: true })),
-);
 
 // Builds a transcript in the form that Claude Code writes, with synthetic content.
 class Transcript {
@@ -84,34 +78,21 @@ class Transcript {
       level: "info",
       compactMetadata: { trigger: "auto", preTokens: 1, durationMs: 1 },
     });
-    this.user(
-      summaryUuid,
-      "This session is being continued from a previous conversation.",
-      {
-        isCompactSummary: true,
-        isVisibleInTranscriptOnly: true,
-      },
-    );
+    this.user(summaryUuid, "This session is being continued from a previous conversation.", {
+      isCompactSummary: true,
+      isVisibleInTranscriptOnly: true,
+    });
     this.records.at(-1).parentUuid = boundaryUuid;
   }
 
   write() {
-    const configDir = mkdtempSync(join(tmpdir(), "acp-proxy-history-"));
-    directories.push(configDir);
+    const configDir = temporaryDirectory();
     const project = join(configDir, "projects", "-tmp-p");
     mkdirSync(project, { recursive: true });
     const lines = this.records.map((record) => JSON.stringify(record));
     writeFileSync(join(project, `${SESSION}.jsonl`), `${lines.join("\n")}\n`);
     return configDir;
   }
-}
-
-function cleanEnv() {
-  const env = { ...process.env };
-  for (const name of Object.keys(env)) {
-    if (name.startsWith("CLAUDE_ACP_PROXY_")) delete env[name];
-  }
-  return env;
 }
 
 // Runs getSessionMessages through the shim, as the adapter does, and returns the texts.
@@ -124,23 +105,18 @@ function history(configDir, env = {}, sessionId = SESSION) {
     const rows = messages.map((m) => [m.uuid, text(m), m.isQueuedCommand === true]);
     console.log(JSON.stringify(rows));
   `;
-  const result = spawnSync(
-    process.execPath,
-    ["--import", hook, "--input-type=module", "--eval", code],
-    {
-      cwd: adapterDir,
-      encoding: "utf8",
-      env: { ...cleanEnv(), CLAUDE_CONFIG_DIR: configDir, ...env },
-    },
-  );
+  const result = spawnSync(process.execPath, ["--import", HOOK, "--input-type=module", "--eval", code], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...cleanEnv(), CLAUDE_CONFIG_DIR: configDir, ...env },
+  });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout.trim().split("\n").at(-1));
 }
 
 const ids = (rows) => rows.map(([uuid]) => uuid);
-const options = { skip: installed ? false : "run `npm ci` in adapter/ first" };
 
-test("a compacted thread replays from before the compaction", options, () => {
+test("a compacted thread replays from before the compaction", needsAdapter, () => {
   const t = new Transcript();
   t.user("u1", "first question");
   t.assistant("a1", "first answer");
@@ -151,15 +127,11 @@ test("a compacted thread replays from before the compaction", options, () => {
   t.assistant("a3", "answer after");
   const dir = t.write();
 
-  assert.deepEqual(ids(history(dir, { CLAUDE_ACP_PROXY_FULL_HISTORY: "0" })), [
-    "s1",
-    "u3",
-    "a3",
-  ]);
+  assert.deepEqual(ids(history(dir, { CLAUDE_ACP_PROXY_FULL_HISTORY: "0" })), ["s1", "u3", "a3"]);
   assert.deepEqual(ids(history(dir)), ["u1", "a1", "u2", "a2", "s1", "u3", "a3"]);
 });
 
-test("prompts typed while Claude worked come back with the SDK's uuid", options, () => {
+test("prompts typed while Claude worked come back with the SDK's uuid", needsAdapter, () => {
   const t = new Transcript();
   t.user("u1", "start");
   t.queued("q1", "typed-1", "a prompt typed meanwhile");
@@ -178,26 +150,22 @@ test("prompts typed while Claude worked come back with the SDK's uuid", options,
   );
 });
 
-test(
-  "several compactions are crossed, also when a logical parent is missing",
-  options,
-  () => {
-    const t = new Transcript();
-    t.user("u1", "one");
-    t.assistant("a1", "one answer");
-    t.compact("b1", "s1", { logicalParentUuid: "not-in-the-file" });
-    t.user("u2", "two");
-    t.assistant("a2", "two answer");
-    t.compact("b2", "s2");
-    t.user("u3", "three");
-    const rows = history(t.write());
+test("several compactions are crossed, also when a logical parent is missing", needsAdapter, () => {
+  const t = new Transcript();
+  t.user("u1", "one");
+  t.assistant("a1", "one answer");
+  t.compact("b1", "s1", { logicalParentUuid: "not-in-the-file" });
+  t.user("u2", "two");
+  t.assistant("a2", "two answer");
+  t.compact("b2", "s2");
+  t.user("u3", "three");
+  const rows = history(t.write());
 
-    assert.deepEqual(ids(rows), ["u1", "a1", "s1", "u2", "a2", "s2", "u3"]);
-    assert.equal(new Set(ids(rows)).size, rows.length, "no message twice");
-  },
-);
+  assert.deepEqual(ids(rows), ["u1", "a1", "s1", "u2", "a2", "s2", "u3"]);
+  assert.equal(new Set(ids(rows)).size, rows.length, "no message twice");
+});
 
-test("a thread that was never compacted is unchanged", options, () => {
+test("a thread that was never compacted is unchanged", needsAdapter, () => {
   const t = new Transcript();
   t.user("u1", "hello");
   t.assistant("a1", "hi");
@@ -206,21 +174,12 @@ test("a thread that was never compacted is unchanged", options, () => {
   assert.deepEqual(history(dir), history(dir, { CLAUDE_ACP_PROXY_FULL_HISTORY: "0" }));
 });
 
-test("an id that is not a session id never reaches the file system", options, () => {
+test("an id that is not a session id never reaches the file system", needsAdapter, () => {
   const t = new Transcript();
   t.user("u1", "hello");
   t.compact("b1", "s1");
   const dir = t.write();
-  const outside = join(
-    dir,
-    "projects",
-    "-tmp-p",
-    "..",
-    "..",
-    "projects",
-    "-tmp-p",
-    SESSION,
-  );
+  const outside = join(dir, "projects", "-tmp-p", "..", "..", "projects", "-tmp-p", SESSION);
 
   assert.deepEqual(history(dir, {}, outside), []);
 });

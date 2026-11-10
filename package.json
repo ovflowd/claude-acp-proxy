@@ -1,13 +1,24 @@
 {
   "name": "claude-acp-proxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A wrapper around claude-agent-acp that gives editors such as Zed safer defaults, full history and per-thread settings",
   "license": "MIT",
   "private": true,
   "type": "module",
-  "repository": { "type": "git", "url": "git+https://github.com/ovflowd/claude-acp-proxy.git" },
-  "engines": { "node": "^22.15.0 || >=23.5.0" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ovflowd/claude-acp-proxy.git"
+  },
+  "bin": {
+    "claude-acp-proxy": "bin/claude-acp-proxy.mjs"
+  },
+  "engines": {
+    "node": "^22.15.0 || >=23.5.0"
+  },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.99.1"
   }
 }

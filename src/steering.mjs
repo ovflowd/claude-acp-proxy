@@ -1,45 +1,73 @@
 import { randomUUID } from "node:crypto";
 
+import { logProblem } from "./log.mjs";
+
+/** @typedef {import("./protocol.mjs").Message} Message */
+
+/**
+ * @typedef {object} Turn
+ * @property {Message["id"]} promptId The prompt that started the turn at the adapter.
+ * @property {Message["id"]} waiting The editor's prompt that the turn's answer goes to.
+ * @property {Message | undefined} prompt That prompt.
+ * @property {boolean} released Whether the editor was told the turn was cancelled.
+ * @property {boolean} steering Whether a steering request is on its way.
+ * @property {ReturnType<typeof setTimeout> | undefined} timer The held cancel.
+ * @property {Message | undefined} final The turn's answer, when it came before the steering reply.
+ */
+
 const STEER_METHOD = "_session/steering";
 const CANCEL_WINDOW_MS = 300;
 
-function report(error) {
-  console.error(`steering: ${error?.message ?? error}`);
-}
+/** @param {unknown} problem */
+const report = (problem) => logProblem("steering", problem);
 
 /**
  * Turns "stop, then send a new message" into a message that steers the running turn.
  *
- * An editor that interrupts sends `session/cancel`, waits for the answer to the running
- * prompt, and only then sends the new `session/prompt`. So the cancel is held back and
- * the running prompt is answered as cancelled at once. A prompt that follows within the
- * window is sent as `_session/steering`, and the real answer of the turn then answers
- * that prompt. With no prompt, the cancel goes to the adapter when the window is over.
+ * An editor that interrupts sends `session/cancel`, waits for the answer to the running prompt, and only then
+ * sends the new `session/prompt`. So the cancel is held back and the running prompt is answered as cancelled at
+ * once. A prompt that follows within the window is sent as `_session/steering`, and the real answer of the turn
+ * then answers that prompt. With no prompt, the cancel goes to the adapter when the window is over.
  *
- * The host calls `fromClient(message)` for each client message, which returns the
- * message to pass on or undefined, and `fromAgent(message)` for each adapter message
- * (true: taken, do not forward). It gives `send` (to the adapter) and `forward` (to the
- * client). Nothing happens unless the adapter advertises steering in `initialize`.
+ * Nothing changes unless the adapter advertises steering in `initialize`.
  */
 export class Steering {
+  /** @type {(message: Message) => void} */
   #send;
+  /** @type {(message: Message) => void} */
   #forward;
+  /** @type {number} */
   #windowMs;
   #prefix = `steer:${randomUUID()}:`;
   #sequence = 0;
   #supported = false;
+  /** @type {Set<Message["id"]>} */
   #initializeIds = new Set();
+  /** @type {Map<string, Turn>} */
   #turns = new Map();
+  /** @type {Map<Message["id"], string>} */
   #turnIdByPromptId = new Map();
+  /** @type {Set<Message["id"]>} */
   #orphans = new Set();
+  /** @type {Map<Message["id"], string>} */
   #steers = new Map();
 
+  /**
+   * @param {object} options
+   * @param {(message: Message) => void} options.send To the adapter.
+   * @param {(message: Message) => void} options.forward To the editor.
+   * @param {number} [options.windowMs] How long a cancel is held back.
+   */
   constructor({ send, forward, windowMs = CANCEL_WINDOW_MS }) {
     this.#send = send;
     this.#forward = forward;
     this.#windowMs = windowMs;
   }
 
+  /**
+   * @param {Message} message
+   * @returns {Message | undefined} The message to pass on, or undefined when steering took it.
+   */
   fromClient(message) {
     try {
       return this.#fromClient(message);
@@ -49,6 +77,10 @@ export class Steering {
     }
   }
 
+  /**
+   * @param {Message} message
+   * @returns {boolean} True when steering took the message, which must then not be forwarded.
+   */
   fromAgent(message) {
     try {
       return this.#fromAgent(message);
@@ -58,6 +90,7 @@ export class Steering {
     }
   }
 
+  /** @param {Message} message */
   #fromClient(message) {
     if (message?.method === "initialize" && message.id !== undefined) {
       this.#initializeIds.add(message.id);
@@ -65,13 +98,15 @@ export class Steering {
     }
     const sessionId = message?.params?.sessionId;
     if (typeof sessionId !== "string") return message;
-    if (message.method === "session/prompt" && message.id !== undefined) {
-      return this.#prompt(sessionId, message);
-    }
+    if (message.method === "session/prompt" && message.id !== undefined) return this.#prompt(sessionId, message);
     if (message.method === "session/cancel") return this.#cancel(sessionId, message);
     return message;
   }
 
+  /**
+   * @param {string} sessionId
+   * @param {Message} message
+   */
   #prompt(sessionId, message) {
     const turn = this.#turns.get(sessionId);
     if (!turn?.released || !turn.timer) {
@@ -98,6 +133,10 @@ export class Steering {
     return undefined;
   }
 
+  /**
+   * @param {string} sessionId
+   * @param {Message} message
+   */
   #cancel(sessionId, message) {
     const turn = this.#turns.get(sessionId);
     if (!this.#supported || !turn) return message;
@@ -115,6 +154,7 @@ export class Steering {
     return undefined;
   }
 
+  /** @param {Message} message */
   #fromAgent(message) {
     if (message?.id === undefined || message.method !== undefined) return false;
     if (this.#initializeIds.delete(message.id)) {
@@ -139,7 +179,13 @@ export class Steering {
     return this.#finish(sessionId, turn, message);
   }
 
-  /** The adapter answered the turn that the editor started: pass the answer on. */
+  /**
+   * The adapter answered the turn that the editor started: pass the answer on.
+   *
+   * @param {string} sessionId
+   * @param {Turn} turn
+   * @param {Message} message
+   */
   #finish(sessionId, turn, message) {
     clearTimeout(turn.timer);
     this.#turns.delete(sessionId);
@@ -149,11 +195,12 @@ export class Steering {
     return true;
   }
 
+  /** @param {Message} message */
   #steerReply(message) {
     const sessionId = this.#steers.get(message.id);
     this.#steers.delete(message.id);
-    const turn = this.#turns.get(sessionId);
-    if (!turn) return;
+    const turn = sessionId === undefined ? undefined : this.#turns.get(sessionId);
+    if (!turn || sessionId === undefined) return;
     turn.steering = false;
     const prompt = turn.prompt;
     const stillWanted = prompt !== undefined && turn.waiting === prompt.id;
@@ -166,12 +213,14 @@ export class Steering {
     this.#send(prompt);
   }
 
+  /**
+   * @param {string} sessionId
+   * @param {Message} prompt
+   */
   #begin(sessionId, prompt) {
     const previous = this.#turns.get(sessionId);
     clearTimeout(previous?.timer);
-    if (previous && this.#turnIdByPromptId.has(previous.promptId)) {
-      this.#orphans.add(previous.promptId);
-    }
+    if (previous && this.#turnIdByPromptId.has(previous.promptId)) this.#orphans.add(previous.promptId);
     const promptId = prompt.id;
     this.#turns.set(sessionId, {
       promptId,
@@ -185,12 +234,15 @@ export class Steering {
     this.#turnIdByPromptId.set(promptId, sessionId);
   }
 
+  /**
+   * @param {Message["id"]} id
+   * @param {Message | undefined} prompt
+   * @param {any} result
+   * @param {any} [error]
+   */
   #answer(id, prompt, result, error) {
     const messageId = prompt?.params?.messageId;
-    const withId =
-      messageId === undefined || !result
-        ? result
-        : { ...result, userMessageId: messageId };
+    const withId = messageId === undefined || !result ? result : { ...result, userMessageId: messageId };
     this.#forward({ jsonrpc: "2.0", id, ...(error ? { error } : { result: withId }) });
   }
 }

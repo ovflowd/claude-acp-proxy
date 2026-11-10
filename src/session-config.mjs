@@ -1,75 +1,109 @@
-// Puts a thread's model, effort and toggles back when Zed opens it again. Zed applies
-// its `default_config_options` to new sessions only, and shows what the adapter answers
-// on load and resume. The host calls `fromClient(message)` for each client message and
-// `fromAgent(message)` for each adapter message (true: taken, do not forward), and
-// gives `send` (to the adapter) and `forward` (to the client).
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { open, readdir } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 
-const SET_METHODS = new Set([
-  "session/set_config_option",
-  "session/set_model",
-  "session/set_mode",
-]);
+import { readConfig } from "./config.mjs";
+import { logProblem } from "./log.mjs";
+import { readTranscriptTail } from "./transcripts.mjs";
+
+/** @typedef {import("./protocol.mjs").Message} Message */
+
+/**
+ * A request that set one of a thread's options, as the editor sent it.
+ *
+ * @typedef {{ method: string, params: { sessionId: string, [key: string]: any } }} Call
+ */
+
+/** @typedef {{ updated?: number, calls: Record<string, Call> }} Session */
+
+/** @typedef {{ result?: any, error?: any, timedOut?: boolean }} Reply */
+
+const SET_METHODS = new Set(["session/set_config_option", "session/set_model", "session/set_mode"]);
 const OPEN_METHODS = new Set(["session/load", "session/resume"]);
+/** @type {Record<string, [configId: string, field: string]>} */
 const LEGACY_SETTERS = {
   "session/set_model": ["model", "modelId"],
   "session/set_mode": ["mode", "modeId"],
 };
-const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RESTORE_TIMEOUT_MS = 30_000;
 const MAX_SESSIONS = 300;
 const TRANSCRIPT_TAIL_BYTES = 512 * 1024;
 const MODEL_FAMILIES = ["opus", "sonnet", "haiku", "fable", "mythos"];
+// The model goes first: a model can change which efforts are offered.
 const SLOT_ORDER = ["model", "effort", "ultracode", "fast"];
 
-function defaultStateFile() {
-  if (process.env.CLAUDE_ACP_PROXY_STATE_FILE) {
-    return process.env.CLAUDE_ACP_PROXY_STATE_FILE;
-  }
-  const state = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
-  return join(state, "claude-acp-proxy", "sessions.json");
-}
+/** @param {unknown} problem */
+const report = (problem) => logProblem("session config", problem);
 
-function report(error) {
-  console.error(`session config: ${error?.message ?? error}`);
-}
-
+/**
+ * Puts a thread's model, effort and toggles back when the editor opens it again.
+ *
+ * Zed applies its `default_config_options` to new sessions only, and shows what the adapter answers on load and
+ * resume, which comes from the user's settings. So after a successful load or resume, the memory sends the
+ * thread's remembered requests to the adapter again and holds the response until they are done.
+ *
+ * It does not depend on src/proxy.mjs, only on config.mjs, log.mjs and transcripts.mjs. The host calls `fromClient(message)` for each message from the
+ * editor, before any rewriting, and `fromAgent(message)` for each message from the adapter.
+ */
 export class SessionConfigMemory {
+  /** @type {string} */
   #file;
+  /** @type {(message: Message) => void} */
   #send;
+  /** @type {(message: Message) => void} */
   #forward;
+  /** @type {string} */
+  #claudeConfigDir;
+  /** @type {Record<string, Session>} */
   #sessions;
+  /** @type {Map<Message["id"], Call>} */
   #setRequests = new Map();
+  /** @type {Map<Message["id"], string>} */
   #openRequests = new Map();
+  /** @type {Map<string, (reply: Reply) => void>} */
   #restoreReplies = new Map();
   #sequence = 0;
-  // Ids of the requests that this memory sends: a client cannot use one by chance.
+  // The ids of the requests that the memory sends: a client cannot use one by chance.
   #restorePrefix = `restore:${randomUUID()}:`;
 
-  constructor({ send, forward, file = defaultStateFile() }) {
+  /**
+   * @param {object} options
+   * @param {(message: Message) => void} options.send Writes a request to the adapter. The restore requests are the
+   *   editor's own requests again, so they should go through the same rewriting as a message from the editor.
+   * @param {(message: Message) => void} options.forward Writes the held load or resume response to the editor,
+   *   through the same rewriting as any other adapter response.
+   * @param {string} [options.file]
+   * @param {string} [options.claudeConfigDir] The Claude Code profile, for a thread's model in its transcript.
+   */
+  constructor({ send, forward, file, claudeConfigDir }) {
+    const config = readConfig(process.env, () => {});
     this.#send = send;
     this.#forward = forward;
-    this.#file = file;
+    this.#file = file ?? config.stateFile;
+    this.#claudeConfigDir = claudeConfigDir ?? config.claudeConfigDir;
     this.#sessions = this.#read();
   }
 
+  /** @param {Message} message */
   fromClient(message) {
     try {
       if (message?.id === undefined || typeof message.method !== "string") return;
       const sessionId = message.params?.sessionId;
       if (typeof sessionId !== "string") return;
-      if (SET_METHODS.has(message.method)) this.#setRequests.set(message.id, message);
-      else if (OPEN_METHODS.has(message.method))
+      if (SET_METHODS.has(message.method)) {
+        this.#setRequests.set(message.id, { method: message.method, params: message.params });
+      } else if (OPEN_METHODS.has(message.method)) {
         this.#openRequests.set(message.id, sessionId);
+      }
     } catch (error) {
       report(error);
     }
   }
 
+  /**
+   * @param {Message} message
+   * @returns {boolean} True when the memory took the message, which must then not be forwarded.
+   */
   fromAgent(message) {
     try {
       return this.#takeFromAgent(message);
@@ -79,6 +113,7 @@ export class SessionConfigMemory {
     }
   }
 
+  /** @param {Message} message */
   #takeFromAgent(message) {
     if (message?.id === undefined || message.method !== undefined) return false;
     if (typeof message.id === "string" && message.id.startsWith(this.#restorePrefix)) {
@@ -102,6 +137,7 @@ export class SessionConfigMemory {
     return true;
   }
 
+  /** @param {Call} request */
   #remember(request) {
     const { sessionId } = request.params;
     this.#refresh();
@@ -111,11 +147,16 @@ export class SessionConfigMemory {
     this.#write();
   }
 
+  /**
+   * @param {string} sessionId
+   * @param {Message} response The adapter's response to the load or resume, changed in place.
+   */
   async #restore(sessionId, response) {
     this.#refresh();
     const session = this.#sessions[sessionId];
     const configOptions = response.result?.configOptions;
     let calls = session ? Object.values(session.calls) : [];
+    /** @type {Call | undefined} */
     let bootstrap;
     if (calls.length === 0) {
       bootstrap = await this.#bootstrapModel(sessionId, configOptions);
@@ -124,20 +165,16 @@ export class SessionConfigMemory {
     }
     calls.sort((a, b) => rank(slotOf(a)) - rank(slotOf(b)));
 
+    /** @type {any[] | undefined} */
     let restored;
     const deadline = Date.now() + RESTORE_TIMEOUT_MS;
     for (const call of calls) {
       const sent = asConfigOption(call, configOptions);
-      const reply = await this.#request(
-        sent.method,
-        sent.params,
-        deadline - Date.now(),
-      );
+      const reply = await this.#request(sent.method, sent.params, deadline - Date.now());
       if (reply.timedOut) break;
       if (reply.error) continue;
       if (call === bootstrap) this.#remember(call);
-      if (Array.isArray(reply.result?.configOptions))
-        restored = reply.result.configOptions;
+      if (Array.isArray(reply.result?.configOptions)) restored = reply.result.configOptions;
     }
     if (!restored || !response.result) return;
     response.result.configOptions = restored;
@@ -152,10 +189,17 @@ export class SessionConfigMemory {
     }
   }
 
+  /**
+   * @param {string} method
+   * @param {Call["params"]} params
+   * @param {number} timeoutMs
+   * @returns {Promise<Reply>}
+   */
   #request(method, params, timeoutMs) {
     if (timeoutMs <= 0) return Promise.resolve({ timedOut: true });
     const id = `${this.#restorePrefix}${++this.#sequence}`;
     return new Promise((resolve) => {
+      /** @param {Reply} reply */
       const finish = (reply) => {
         clearTimeout(timer);
         this.#restoreReplies.delete(id);
@@ -167,31 +211,38 @@ export class SessionConfigMemory {
     });
   }
 
+  /**
+   * A thread with no record takes the model family of its transcript.
+   *
+   * @param {string} sessionId
+   * @param {any[] | undefined} configOptions
+   * @returns {Promise<Call | undefined>}
+   */
   async #bootstrapModel(sessionId, configOptions) {
     const modelOption = configOptions?.find((option) => option.id === "model");
     if (!modelOption || !Array.isArray(modelOption.options)) return undefined;
-    const transcriptModel = await lastTranscriptModel(sessionId);
+    const tail = await readTranscriptTail(sessionId, this.#claudeConfigDir, TRANSCRIPT_TAIL_BYTES);
+    const models = tail === undefined ? [] : [...tail.matchAll(/"model":"(claude-[^"]+)"/g)];
+    const transcriptModel = models.at(-1)?.[1];
     const family = MODEL_FAMILIES.find((name) => transcriptModel?.includes(name));
     if (!family || modelOption.currentValue === family) return undefined;
-    if (!modelOption.options.some((option) => option.value === family))
-      return undefined;
+    if (!modelOption.options.some((/** @type {any} */ option) => option.value === family)) return undefined;
     return {
       method: "session/set_config_option",
       params: { sessionId, configId: "model", value: family },
     };
   }
 
-  // Another Zed window runs its own proxy on the same file.
+  // Another editor window runs its own proxy on the same file.
   #refresh() {
     this.#sessions = { ...this.#sessions, ...this.#read() };
   }
 
+  /** @returns {Record<string, Session>} */
   #read() {
     try {
       const { sessions } = JSON.parse(readFileSync(this.#file, "utf8"));
-      return Object.fromEntries(
-        Object.entries(sessions ?? {}).filter(([, session]) => isSession(session)),
-      );
+      return Object.fromEntries(Object.entries(sessions ?? {}).filter(([, session]) => isSession(session)));
     } catch {
       return {};
     }
@@ -200,7 +251,7 @@ export class SessionConfigMemory {
   #write() {
     try {
       const newest = Object.entries(this.#sessions)
-        .sort(([, a], [, b]) => (b.updated ?? 0) - (a.updated ?? 0))
+        .toSorted(([, a], [, b]) => (b.updated ?? 0) - (a.updated ?? 0))
         .slice(0, MAX_SESSIONS);
       this.#sessions = Object.fromEntries(newest);
       mkdirSync(dirname(this.#file), { recursive: true, mode: 0o700 });
@@ -215,29 +266,40 @@ export class SessionConfigMemory {
         throw error;
       }
     } catch (error) {
-      report(`could not save: ${error?.message ?? error}`);
+      report(`could not save: ${error instanceof Error ? error.message : error}`);
     }
   }
 }
 
+/**
+ * @param {any} session
+ * @returns {session is Session}
+ */
 function isSession(session) {
   const calls = session?.calls;
   if (typeof calls !== "object" || calls === null) return false;
   return Object.values(calls).every(
-    (call) =>
-      typeof call?.method === "string" && typeof call.params?.sessionId === "string",
+    (call) => typeof call?.method === "string" && typeof call.params?.sessionId === "string",
   );
 }
 
-/** The option that a request sets: both forms of one setting share a slot. */
+/**
+ * The option that a request sets: both forms of one setting share a slot.
+ *
+ * @param {Call} call
+ */
 function slotOf(call) {
   if (call.method === "session/set_config_option") return String(call.params.configId);
   return LEGACY_SETTERS[call.method]?.[0] ?? call.method;
 }
 
 /**
- * A legacy request becomes the option request when the adapter offers that option,
- * because the reply to the option request has the new option list.
+ * A legacy request becomes the option request when the adapter offers that option, because the reply to the
+ * option request has the new option list.
+ *
+ * @param {Call} call
+ * @param {any[] | undefined} configOptions
+ * @returns {Call}
  */
 function asConfigOption(call, configOptions) {
   const legacy = LEGACY_SETTERS[call.method];
@@ -249,41 +311,8 @@ function asConfigOption(call, configOptions) {
   };
 }
 
-/** The model goes first: a model can change which efforts are offered. */
+/** @param {string} slot */
 function rank(slot) {
   const index = SLOT_ORDER.indexOf(slot);
   return index === -1 ? SLOT_ORDER.length : index;
-}
-
-async function lastTranscriptModel(sessionId) {
-  if (!SESSION_ID.test(sessionId)) return undefined;
-  const projects = join(
-    process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
-    "projects",
-  );
-  let directories;
-  try {
-    directories = await readdir(projects);
-  } catch {
-    return undefined;
-  }
-  for (const directory of directories) {
-    let handle;
-    try {
-      handle = await open(join(projects, directory, `${sessionId}.jsonl`), "r");
-    } catch {
-      continue;
-    }
-    try {
-      const { size } = await handle.stat();
-      const length = Math.min(size, TRANSCRIPT_TAIL_BYTES);
-      const tail = Buffer.alloc(length);
-      await handle.read(tail, 0, length, size - length);
-      const models = [...tail.toString("utf8").matchAll(/"model":"(claude-[^"]+)"/g)];
-      return models.at(-1)?.[1];
-    } finally {
-      await handle.close();
-    }
-  }
-  return undefined;
 }

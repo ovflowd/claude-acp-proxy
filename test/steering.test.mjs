@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Steering } from "../steering.mjs";
+
+import { Steering } from "../src/steering.mjs";
 
 const WINDOW = 25;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -34,8 +35,7 @@ const cancel = (sessionId = "S") => ({
   params: { sessionId },
 });
 const reply = (id, result) => ({ jsonrpc: "2.0", id, result });
-const steers = (sent) =>
-  sent.filter((message) => message.method === "_session/steering");
+const steers = (sent) => sent.filter((message) => message.method === "_session/steering");
 const cancels = (sent) => sent.filter((message) => message.method === "session/cancel");
 
 test("a turn that nobody interrupts is passed through untouched", () => {
@@ -114,11 +114,7 @@ test("a prompt after the window is an ordinary prompt", async () => {
   assert.equal(client(second), second, "passed on as it is");
   assert.deepEqual(steers(sent), []);
 
-  assert.equal(
-    agent(reply(10, { stopReason: "cancelled" })),
-    true,
-    "late answer dropped",
-  );
+  assert.equal(agent(reply(10, { stopReason: "cancelled" })), true, "late answer dropped");
   assert.equal(agent(reply(11, { stopReason: "end_turn" })), false);
 });
 
