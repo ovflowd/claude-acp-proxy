@@ -8,9 +8,9 @@ updates:
       default-days: 7
     open-pull-requests-limit: 3
     groups:
-      # Everything but the adapter is for development, so one pull request moves them together.
-      dev:
-        dependency-type: development
+      npm:
+        patterns:
+          - "*"
     ignore:
       # Dependabot never offered a newer release for the exact 0.x pin, so the "Update the adapter" workflow
       # opens that pull request instead.
@@ -24,3 +24,7 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
