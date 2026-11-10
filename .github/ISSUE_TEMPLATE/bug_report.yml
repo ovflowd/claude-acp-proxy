@@ -1,5 +1,5 @@
 name: Bug report
-description: Something does not work as the README says
+description: Something does not work as the docs say
 body:
   - type: markdown
     attributes:
@@ -10,7 +10,7 @@ body:
     id: adapter
     attributes:
       label: Adapter version
-      description: The version in `adapter/package.json`, or the output of `npm ls` in `adapter/`.
+      description: The output of `npm ls @agentclientprotocol/claude-agent-acp` in your checkout.
     validations:
       required: true
   - type: input
