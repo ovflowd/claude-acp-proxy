@@ -26,7 +26,7 @@
     "@agentclientprotocol/claude-agent-acp": "0.99.1"
   },
   "devDependencies": {
-    "@types/node": "22.20.4",
+    "@types/node": "22.20.5",
     "oxfmt": "0.76.0",
     "oxlint": "1.91.0",
     "typescript": "7.0.2"
