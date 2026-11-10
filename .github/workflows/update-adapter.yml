@@ -16,6 +16,8 @@ jobs:
     name: Open a pull request for a new adapter version
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # This job holds a write token, so it never runs the new release: it only changes the pin and the lockfile.
+    # The tests and the enableRemoteControl check run in CI on the pull request's branch, with a read-only token.
     permissions:
       contents: write
       pull-requests: write
@@ -24,10 +26,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PACKAGE: "@agentclientprotocol/claude-agent-acp"
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -36,7 +39,7 @@ jobs:
         shell: bash
         run: |
           latest=$(npm view "$PACKAGE" version --registry=https://registry.npmjs.org/)
-          current=$(node -p "require('./adapter/package.json').dependencies[process.env.PACKAGE]")
+          current=$(node -p "require('./package.json').dependencies[process.env.PACKAGE]")
           echo "latest $latest, pinned $current"
           if ! [[ "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::The latest version is not a release: $latest"
@@ -62,60 +65,57 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install the new version
-        id: install
+      # --package-lock-only resolves the new versions from the registry's metadata and installs nothing, so no code
+      # from the release runs here.
+      - name: Update the pin and the lockfile
+        id: lockfile
         if: steps.version.outputs.update == 'true' && steps.existing.outputs.skip != 'true'
         shell: bash
-        working-directory: adapter
         env:
           LATEST: ${{ steps.version.outputs.latest }}
         run: |
-          old_sdk=$(node -p "require('./package-lock.json').packages['node_modules/@anthropic-ai/claude-agent-sdk'].version")
-          npm install --save-exact "$PACKAGE@$LATEST" --registry=https://registry.npmjs.org/
-          new_sdk=$(node -p "require('./node_modules/@anthropic-ai/claude-agent-sdk/package.json').version")
+          sdk="node_modules/@anthropic-ai/claude-agent-sdk"
+          old_sdk=$(node -p "require('./package-lock.json').packages['$sdk'].version")
+          npm install --package-lock-only --ignore-scripts --save-exact "$PACKAGE@$LATEST" \
+            --registry=https://registry.npmjs.org/
+          new_sdk=$(node -p "require('./package-lock.json').packages['$sdk'].version")
           echo "old_sdk=$old_sdk" >> "$GITHUB_OUTPUT"
           echo "new_sdk=$new_sdk" >> "$GITHUB_OUTPUT"
 
-      - name: Check that the SDK still has enableRemoteControl
-        if: steps.install.outcome == 'success'
-        shell: bash
-        run: grep -q enableRemoteControl adapter/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
-
-      - name: Test
-        if: steps.install.outcome == 'success'
-        run: npm test
-
       - name: Open the pull request
-        if: steps.install.outcome == 'success'
+        if: steps.lockfile.outcome == 'success'
         shell: bash
         env:
           LATEST: ${{ steps.version.outputs.latest }}
           CURRENT: ${{ steps.version.outputs.current }}
-          OLD_SDK: ${{ steps.install.outputs.old_sdk }}
-          NEW_SDK: ${{ steps.install.outputs.new_sdk }}
+          OLD_SDK: ${{ steps.lockfile.outputs.old_sdk }}
+          NEW_SDK: ${{ steps.lockfile.outputs.new_sdk }}
         run: |
           branch="automation/adapter-$LATEST"
+          title="chore(deps): bump the adapter from $CURRENT to $LATEST"
           upstream="https://github.com/agentclientprotocol/claude-agent-acp"
+          upgrading="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/main/docs/upgrading.md#upgrading-the-adapter"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git add adapter/package.json adapter/package-lock.json
-          git commit -m "chore(deps): bump the adapter to $LATEST" \
+          git add package.json package-lock.json
+          git commit -m "$title" \
             -m "Claude Agent SDK $OLD_SDK to $NEW_SDK. Changes: $upstream/compare/v$CURRENT...v$LATEST"
-          git push origin "$branch"
+          # The branch belongs to this workflow. One left by a run that failed before its pull request is replaced,
+          # or every later run would stop here.
+          gh auth setup-git
+          git push --force origin "$branch"
 
-          cat > body.md <<BODY
-          Bumps \`$PACKAGE\` from $CURRENT to $LATEST, and the Claude Agent SDK it
-          installs from $OLD_SDK to $NEW_SDK.
+          # GitHub renders a single newline in a pull request body as a line break: one line per paragraph.
+          cat > "$RUNNER_TEMP/body.md" <<BODY
+          Bumps \`$PACKAGE\` from $CURRENT to $LATEST, and the Claude Agent SDK it installs from $OLD_SDK to $NEW_SDK.
 
           - [Changes between the two versions]($upstream/compare/v$CURRENT...v$LATEST)
           - [Changelog]($upstream/blob/main/CHANGELOG.md)
 
-          The workflow ran the tests on Linux and checked that the SDK still has
-          \`enableRemoteControl\`. The CI workflow runs on this branch too, on Linux and
-          macOS.
+          CI runs the tests and checks that the SDK still has \`enableRemoteControl\` on this branch, on Linux and macOS. This workflow did not run the new release.
 
-          Before merging, check in the editor (see the README, *Upgrading the adapter*):
+          Before merging, check in the editor ([docs/upgrading.md]($upgrading)):
 
           - [ ] A thread in a repository with a \`CLAUDE.md\` keeps it out of context.
           - [ ] A compacted thread's history starts before its summary.
@@ -124,12 +124,11 @@ jobs:
 
           This pull request was opened by the *Update the adapter* workflow.
           BODY
-          gh pr create --base main --head "$branch" \
-            --title "chore(deps): Bump the adapter from $CURRENT to $LATEST" \
-            --body-file body.md
+          gh pr create --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md"
 
           for number in $(gh pr list --state open --json number,headRefName \
             --jq ".[] | select(.headRefName | startswith(\"automation/adapter-\")) | select(.headRefName != \"$branch\") | .number"); do
             gh pr close "$number" --delete-branch --comment "Superseded by the bump to $LATEST."
           done
+          # A pull request opened with the workflow's token does not start CI by itself.
           gh workflow run ci.yml --ref "$branch"
