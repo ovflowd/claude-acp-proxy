@@ -1,14 +1,26 @@
 version: 2
 updates:
   - package-ecosystem: npm
-    directory: /adapter
+    directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 3
+    groups:
+      # Everything but the adapter is for development, so one pull request moves them together.
+      dev:
+        dependency-type: development
     ignore:
-      # The "Update the adapter" workflow opens the pull request for this one.
+      # Dependabot never offered a newer release for the exact 0.x pin, so the "Update the adapter" workflow
+      # opens that pull request instead.
       - dependency-name: "@agentclientprotocol/claude-agent-acp"
+      # The types follow the oldest Node the proxy supports, not the newest.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 7
